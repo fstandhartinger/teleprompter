@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#000000">
+<title>Teleprompter</title>
+<style>
+  :root{--fg:#f5f5f5;--muted:#8b8b8b;--accent:#4ade80;--bg:#000}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;overflow:hidden;-webkit-text-size-adjust:100%}
+  #stage{position:fixed;inset:0;overflow:hidden}
+  #scroller{position:absolute;left:0;right:0;top:0;padding:0 7vw;will-change:transform}
+  #text{white-space:pre-wrap;line-height:1.45;font-weight:600;padding-top:42vh;padding-bottom:70vh;text-align:left}
+  #text p{margin:0 0 .9em}
+  .mirror #scroller{transform-origin:center}
+  #guide{position:fixed;left:0;right:0;top:38vh;height:0;border-top:2px solid rgba(74,222,128,.55);pointer-events:none}
+  #guide::before,#guide::after{content:"";position:absolute;top:-9px;border:8px solid transparent}
+  #guide::before{left:6px;border-left-color:var(--accent)}
+  #guide::after{right:6px;border-right-color:var(--accent)}
+  #fadeTop,#fadeBot{position:fixed;left:0;right:0;pointer-events:none}
+  #fadeTop{top:0;height:22vh;background:linear-gradient(#000,rgba(0,0,0,0))}
+  #fadeBot{bottom:0;height:18vh;background:linear-gradient(rgba(0,0,0,0),#000)}
+  #bar{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(safe-area-inset-bottom));display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center;background:rgba(18,18,18,.92);transition:opacity .3s;z-index:5}
+  body.playing #bar{opacity:0;pointer-events:none}
+  button{background:#262626;color:var(--fg);border:1px solid #3a3a3a;border-radius:10px;padding:10px 14px;font-size:15px;min-width:44px;min-height:44px;cursor:pointer}
+  button.primary{background:var(--accent);color:#06210f;border-color:var(--accent);font-weight:700;min-width:96px}
+  label{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:6px}
+  input[type=range]{width:120px;accent-color:var(--accent)}
+  #count{position:fixed;inset:0;display:none;align-items:center;justify-content:center;font-size:28vmin;font-weight:800;color:var(--accent);z-index:6;background:rgba(0,0,0,.55)}
+  #editor{position:fixed;inset:0;background:#0b0b0b;display:none;flex-direction:column;z-index:10;padding:12px 12px calc(12px + env(safe-area-inset-bottom))}
+  #editor textarea{flex:1;width:100%;background:#151515;color:var(--fg);border:1px solid #333;border-radius:10px;padding:14px;font-size:17px;line-height:1.5;resize:none}
+  #editor .row{display:flex;gap:8px;justify-content:flex-end;margin-top:10px;flex-wrap:wrap}
+  #hint{position:fixed;top:calc(8px + env(safe-area-inset-top));left:0;right:0;text-align:center;font-size:12px;color:var(--muted);pointer-events:none;transition:opacity .3s}
+  body.playing #hint{opacity:0}
+  #tapzone{position:fixed;inset:0;bottom:0;z-index:4;display:none}
+  body.playing #tapzone{display:block}
+</style>
+</head>
+<body>
+<div id="stage"><div id="scroller"><div id="text"></div></div></div>
+<div id="fadeTop"></div><div id="fadeBot"></div><div id="guide"></div>
+<div id="hint">Tap / Space = start · pause · ↑↓ speed · ←→ size · R = restart</div>
+<div id="tapzone" aria-hidden="true"></div>
+<div id="count"></div>
+<div id="bar">
+  <button id="restart" title="Back to start">⟲</button>
+  <button id="play" class="primary">▶ Start</button>
+  <label>Speed <input id="speed" type="range" min="10" max="160" step="2" value="48"></label>
+  <label>Size <input id="size" type="range" min="24" max="110" step="1" value="54"></label>
+  <button id="mirror" title="Mirror horizontally">⇋</button>
+  <button id="countdown" title="3-second countdown on/off">3s ✓</button>
+  <button id="edit">✎ Text</button>
+  <button id="full" title="Fullscreen">⛶</button>
+</div>
+<div id="editor">
+  <textarea id="ta" spellcheck="false" aria-label="Script"></textarea>
+  <div class="row">
+    <button id="copylink">Copy link with this text</button>
+    <button id="cancel">Cancel</button>
+    <button id="save" class="primary">Use this text</button>
+  </div>
+</div>
+<script>
+(function(){
+  const DEFAULT = "Paste or type your script via ✎ Text.\n\nOpen a link with #t=... to load a script.";
+  const $ = id => document.getElementById(id);
+  const textEl = $('text'), scroller = $('scroller'), speed = $('speed'), size = $('size');
+  const store = {get(k,d){try{const v=localStorage.getItem('tp.'+k);return v===null?d:v}catch(e){return d}},set(k,v){try{localStorage.setItem('tp.'+k,v)}catch(e){}}};
+  function b64dec(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';return decodeURIComponent(escape(atob(s)))}
+  function b64enc(s){return btoa(unescape(encodeURIComponent(s))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}
+  let script = DEFAULT;
+  const m = location.hash.match(/[#&]t=([^&]+)/);
+  if (m) { try { script = b64dec(m[1]); store.set('text', script); } catch(e){} }
+  else script = store.get('text', DEFAULT);
+  speed.value = store.get('speed', speed.value); size.value = store.get('size', size.value);
+  let mirrored = store.get('mirror','0')==='1', useCount = store.get('count','1')==='1';
+  function render(){
+    textEl.innerHTML = '';
+    script.split(/\n\s*\n/).forEach(par => { const p=document.createElement('p'); p.textContent = par.trim(); textEl.appendChild(p); });
+    textEl.style.fontSize = size.value + 'px';
+  }
+  let y = 0, playing = false, last = 0, wake = null;
+  function maxY(){ return Math.max(0, scroller.scrollHeight - innerHeight*0.45); }
+  function apply(){ scroller.style.transform = `translateY(${-y}px)` + (mirrored ? ' scaleX(-1)' : ''); }
+  function loop(ts){
+    if(!playing) return;
+    const dt = last ? (ts-last)/1000 : 0; last = ts;
+    y = Math.min(maxY(), y + dt * Number(speed.value) * (Number(size.value)/54));
+    apply();
+    if (y >= maxY()) { pause(); return; }
+    requestAnimationFrame(loop);
+  }
+  async function lockWake(){ try { if ('wakeLock' in navigator) wake = await navigator.wakeLock.request('screen'); } catch(e){} }
+  function start(){
+    if (playing) return;
+    const go = () => { playing = true; last = 0; document.body.classList.add('playing'); $('play').textContent='❚❚ Pause'; lockWake(); requestAnimationFrame(loop); };
+    if (useCount && y === 0) {
+      const c = $('count'); let n = 3; c.style.display='flex'; c.textContent = n;
+      const t = setInterval(() => { n--; if (n<=0){ clearInterval(t); c.style.display='none'; go(); } else c.textContent = n; }, 800);
+    } else go();
+  }
+  function pause(){ playing = false; document.body.classList.remove('playing'); $('play').textContent='▶ Start'; try{wake && wake.release()}catch(e){} }
+  function toggle(){ playing ? pause() : start(); }
+  function restart(){ pause(); y = 0; apply(); }
+  $('play').onclick = toggle; $('tapzone').onclick = toggle; $('restart').onclick = restart;
+  speed.oninput = () => store.set('speed', speed.value);
+  size.oninput = () => { store.set('size', size.value); const r = y / Math.max(1,maxY()); textEl.style.fontSize = size.value+'px'; y = r*maxY(); apply(); };
+  $('mirror').onclick = () => { mirrored = !mirrored; store.set('mirror', mirrored?'1':'0'); apply(); };
+  function countLabel(){ $('countdown').textContent = useCount ? '3s ✓' : '3s –'; }
+  $('countdown').onclick = () => { useCount = !useCount; store.set('count', useCount?'1':'0'); countLabel(); };
+  $('full').onclick = () => { const d=document.documentElement; (document.fullscreenElement ? document.exitFullscreen() : (d.requestFullscreen||d.webkitRequestFullscreen||function(){}).call(d)); };
+  $('edit').onclick = () => { pause(); $('ta').value = script; $('editor').style.display='flex'; $('ta').focus(); };
+  $('cancel').onclick = () => { $('editor').style.display='none'; };
+  $('save').onclick = () => { script = $('ta').value || DEFAULT; store.set('text', script); history.replaceState(null,'',location.pathname); $('editor').style.display='none'; render(); restart(); };
+  $('copylink').onclick = async () => { const url = location.origin + location.pathname + '#t=' + b64enc($('ta').value); try { await navigator.clipboard.writeText(url); $('copylink').textContent='Link copied ✓'; } catch(e){ prompt('Copy this link:', url); } setTimeout(()=>{$('copylink').textContent='Copy link with this text'},1800); };
+  document.addEventListener('keydown', e => {
+    if ($('editor').style.display==='flex') return;
+    if (e.code==='Space'||e.key==='Enter'){ e.preventDefault(); toggle(); }
+    else if (e.key==='ArrowUp'){ speed.value = Math.min(160, +speed.value+4); store.set('speed',speed.value); }
+    else if (e.key==='ArrowDown'){ speed.value = Math.max(10, +speed.value-4); store.set('speed',speed.value); }
+    else if (e.key==='ArrowRight'){ size.value = Math.min(110, +size.value+4); size.oninput(); }
+    else if (e.key==='ArrowLeft'){ size.value = Math.max(24, +size.value-4); size.oninput(); }
+    else if (e.key==='r'||e.key==='R'){ restart(); }
+  });
+  let touchY = null;
+  $('tapzone').addEventListener('touchstart', e => { touchY = e.touches[0].clientY; }, {passive:true});
+  $('tapzone').addEventListener('touchmove', e => { if (touchY===null) return; const dy = touchY - e.touches[0].clientY; touchY = e.touches[0].clientY; y = Math.max(0, Math.min(maxY(), y + dy)); apply(); }, {passive:true});
+  countLabel(); render(); apply();
+  addEventListener('resize', apply);
+})();
+</script>
+</body>
+</html>
